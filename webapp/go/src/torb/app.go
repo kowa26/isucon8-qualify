@@ -18,9 +18,11 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
+	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo"
 	"github.com/labstack/echo-contrib/session"
 	"github.com/labstack/echo/middleware"
+	_ "github.com/lib/pq"
 )
 
 type User struct {
@@ -31,11 +33,11 @@ type User struct {
 }
 
 type Event struct {
-	ID       int64  `json:"id,omitempty"`
-	Title    string `json:"title,omitempty"`
-	PublicFg bool   `json:"public,omitempty"`
-	ClosedFg bool   `json:"closed,omitempty"`
-	Price    int64  `json:"price,omitempty"`
+	ID       int64  `json:"id,omitempty" db:"id"`
+	Title    string `json:"title,omitempty" db:"title"`
+	PublicFg bool   `json:"public,omitempty" db:"public_fg"`
+	ClosedFg bool   `json:"closed,omitempty" db:"closed_fg"`
+	Price    int64  `json:"price,omitempty" db:"price"`
 
 	Total   int                `json:"total"`
 	Remains int                `json:"remains"`
@@ -50,24 +52,24 @@ type Sheets struct {
 }
 
 type Sheet struct {
-	ID    int64  `json:"-"`
-	Rank  string `json:"-"`
-	Num   int64  `json:"num"`
-	Price int64  `json:"-"`
+	ID    int64  `json:"-" db:"id"`
+	Rank  string `json:"-" db:"rank"`
+	Num   int64  `json:"num" db:"num"`
+	Price int64  `json:"-" db:"price"`
 
-	Mine           bool       `json:"mine,omitempty"`
-	Reserved       bool       `json:"reserved,omitempty"`
-	ReservedAt     *time.Time `json:"-"`
+	Mine           bool       `json:"mine,omitempty" db:"mine"`
+	Reserved       bool       `json:"reserved,omitempty" db:"reserved"`
+	ReservedAt     *time.Time `json:"-" db:"reserved_at"`
 	ReservedAtUnix int64      `json:"reserved_at,omitempty"`
 }
 
 type Reservation struct {
-	ID         int64      `json:"id"`
-	EventID    int64      `json:"-"`
-	SheetID    int64      `json:"-"`
-	UserID     int64      `json:"-"`
-	ReservedAt *time.Time `json:"-"`
-	CanceledAt *time.Time `json:"-"`
+	ID         int64      `json:"id" db:"id"`
+	EventID    int64      `json:"-" db:"event_id"`
+	SheetID    int64      `json:"-" db:"sheet_id"`
+	UserID     int64      `json:"-" db:"user_id"`
+	ReservedAt *time.Time `json:"-" db:"reserved_at"`
+	CanceledAt *time.Time `json:"-" db:"canceled_at"`
 
 	Event          *Event `json:"event,omitempty"`
 	SheetRank      string `json:"sheet_rank,omitempty"`
@@ -78,10 +80,10 @@ type Reservation struct {
 }
 
 type Administrator struct {
-	ID        int64  `json:"id,omitempty"`
-	Nickname  string `json:"nickname,omitempty"`
-	LoginName string `json:"login_name,omitempty"`
-	PassHash  string `json:"pass_hash,omitempty"`
+	ID        int64  `json:"id,omitempty" db:"id"`
+	Nickname  string `json:"nickname,omitempty" db:"nickname"`
+	LoginName string `json:"login_name,omitempty" db:"login_name"`
+	PassHash  string `json:"pass_hash,omitempty" db:"pass_hash"`
 }
 
 func sessUserID(c echo.Context) int64 {
@@ -179,8 +181,8 @@ func getLoginAdministrator(c echo.Context) (*Administrator, error) {
 	if administratorID == 0 {
 		return nil, errors.New("not logged in")
 	}
-	var administrator Administrator
-	err := db.QueryRow("SELECT id, nickname FROM administrators WHERE id = ?", administratorID).Scan(&administrator.ID, &administrator.Nickname)
+	administrator := Administrator{}
+	err := db.Get(&administrator,"SELECT id, nickname FROM administrators WHERE id = ?", administratorID)
 	return &administrator, err
 }
 
@@ -191,29 +193,25 @@ func getEvents(all bool) ([]*Event, error) {
 	}
 	defer tx.Commit()
 
-	rows, err := tx.Query("SELECT * FROM events ORDER BY id ASC")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var events []*Event
-	for rows.Next() {
-		var event Event
-		if err := rows.Scan(&event.ID, &event.Title, &event.PublicFg, &event.ClosedFg, &event.Price); err != nil {
+	if all {
+		err = db.Select(&events, "SELECT * FROM events ORDER BY id ASC")
+		if err != nil {
 			return nil, err
 		}
-		if !all && !event.PublicFg {
-			continue
+	} else {
+		err = db.Select(&events, "SELECT * FROM events WHERE public_fg=? ORDER BY id ASC", true)
+		if err != nil {
+			return nil, err
 		}
-		events = append(events, &event)
 	}
+
 	for i, v := range events {
 		event, err := getEvent(v.ID, -1)
 		if err != nil {
 			return nil, err
 		}
-		for k := range event.Sheets {
+		for k := range event.Sheets { // sheets[k].Detail 削除
 			event.Sheets[k].Detail = nil
 		}
 		events[i] = event
@@ -223,45 +221,56 @@ func getEvents(all bool) ([]*Event, error) {
 
 func getEvent(eventID, loginUserID int64) (*Event, error) {
 	var event Event
-	if err := db.QueryRow("SELECT * FROM events WHERE id = ?", eventID).Scan(&event.ID, &event.Title, &event.PublicFg, &event.ClosedFg, &event.Price); err != nil {
+	if err := db.Get(&event, "SELECT * FROM events WHERE id = ?", eventID); err != nil {
 		return nil, err
 	}
+	event.Total = 1000
 	event.Sheets = map[string]*Sheets{
-		"S": &Sheets{},
-		"A": &Sheets{},
-		"B": &Sheets{},
-		"C": &Sheets{},
+		"S": &Sheets{
+			Total: 50,
+			Price: 5000 + event.Price,
+		},
+		"A": &Sheets{
+			Total: 150,
+			Price: 3000 + event.Price,
+		},
+		"B": &Sheets{
+			Total: 300,
+			Price: 1000 + event.Price,
+		},
+		"C": &Sheets{
+			Total: 500,
+			Price: 0 + event.Price,
+		},
 	}
 
-	rows, err := db.Query("SELECT * FROM sheets ORDER BY `rank`, num")
+	var sheets []*Sheet
+	// Mine
+	// Reserved
+	// ReservedAt
+	err := db.Select(&sheets, "SELECT sheets.*, (CASE r.user_id WHEN ? THEN 1 ELSE 0 END) AS mine, (CASE WHEN r.id IS NULL THEN 0 ELSE 1 END) AS reserved, r.reserved_at AS reserved_at FROM sheets LEFT OUTER JOIN reservations r ON sheets.id = r.sheet_id AND canceled_at IS NULL AND event_id = ? ORDER BY `rank`, num", loginUserID, eventID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	// Sheets[rank].Price: sheetのランクごとの価格(イベントの価格 + シートの価格)
+	// Total: 1000固定
+	// Remains: 残席
+	// Sheets[rank].Total: S: 50, A:150, B: 300, C: 500
+	// Sheets[rank].Remains: 残席
+	// Sheets[rank].Detail: sheet
+	//		sheet.Mine: 自分自身が予約している場合true
+	//		sheet.Reserved: 予約されていたらtrue
+	//		sheet.ReservedAtUnix:
+	for _, sheet := range sheets {
 
-	for rows.Next() {
-		var sheet Sheet
-		if err := rows.Scan(&sheet.ID, &sheet.Rank, &sheet.Num, &sheet.Price); err != nil {
-			return nil, err
-		}
-		event.Sheets[sheet.Rank].Price = event.Price + sheet.Price
-		event.Total++
-		event.Sheets[sheet.Rank].Total++
-
-		var reservation Reservation
-		err := db.QueryRow("SELECT * FROM reservations WHERE event_id = ? AND sheet_id = ? AND canceled_at IS NULL GROUP BY event_id, sheet_id HAVING reserved_at = MIN(reserved_at)", event.ID, sheet.ID).Scan(&reservation.ID, &reservation.EventID, &reservation.SheetID, &reservation.UserID, &reservation.ReservedAt, &reservation.CanceledAt)
-		if err == nil {
-			sheet.Mine = reservation.UserID == loginUserID
-			sheet.Reserved = true
-			sheet.ReservedAtUnix = reservation.ReservedAt.Unix()
-		} else if err == sql.ErrNoRows {
+		if sheet.Reserved {
+			sheet.ReservedAtUnix = sheet.ReservedAt.Unix()
+		} else {
 			event.Remains++
 			event.Sheets[sheet.Rank].Remains++
-		} else {
-			return nil, err
 		}
 
-		event.Sheets[sheet.Rank].Detail = append(event.Sheets[sheet.Rank].Detail, &sheet)
+		event.Sheets[sheet.Rank].Detail = append(event.Sheets[sheet.Rank].Detail, sheet)
 	}
 
 	return &event, nil
@@ -307,7 +316,7 @@ func (r *Renderer) Render(w io.Writer, name string, data interface{}, c echo.Con
 	return r.templates.ExecuteTemplate(w, name, data)
 }
 
-var db *sql.DB
+var db *sqlx.DB
 
 func main() {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4",
@@ -317,7 +326,7 @@ func main() {
 	)
 
 	var err error
-	db, err = sql.Open("mysql", dsn)
+	db, err = sqlx.Open("mysql", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
