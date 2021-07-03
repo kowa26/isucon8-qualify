@@ -72,7 +72,7 @@ type Reservation struct {
 	CanceledAt *time.Time `json:"-" db:"canceled_at"`
 
 	Event          *Event `json:"event,omitempty"`
-	SheetRank      string `json:"sheet_rank,omitempty"`
+	SheetRank      string `json:"sheet_rank,omitempty" db:"sheet_rank"`
 	SheetNum       int64  `json:"sheet_num,omitempty"`
 	Price          int64  `json:"price,omitempty"`
 	ReservedAtUnix int64  `json:"reserved_at,omitempty"`
@@ -206,21 +206,57 @@ func getEvents(all bool) ([]*Event, error) {
 		}
 	}
 
-	// Total
+	var reservations []*Reservation
+	err = db.Select(&reservations, "SELECT r.*, s.rank AS sheet_rank FROM reservations r INNER JOIN sheets s ON s.id = r.sheet_id WHERE canceled_at IS NULL")
+	if err != nil {
+		return nil, err
+	}
+	remainsOfEvent := make(map[int64]map[string]*Sheets)
+	for _, event := range events {
+		event.Total = 1000
+		remainsOfEvent[event.ID] = map[string]*Sheets{
+			"S": &Sheets{
+				Total: 50,
+				Remains: 50,
+				Price: 5000 + event.Price,
+			},
+			"A": &Sheets{
+				Total: 150,
+				Remains: 150,
+				Price: 3000 + event.Price,
+			},
+			"B": &Sheets{
+				Total: 300,
+				Remains: 300,
+				Price: 1000 + event.Price,
+			},
+			"C": &Sheets{
+				Total: 500,
+				Remains: 500,
+				Price: 0 + event.Price,
+			},
+		}
+	}
+	for _, reservation := range reservations {
+		if _, ok := remainsOfEvent[reservation.EventID]; ok {
+			if _, ok := remainsOfEvent[reservation.EventID][reservation.SheetRank]; ok {
+				remainsOfEvent[reservation.EventID][reservation.SheetRank].Remains--
+			}
+		}
+	}
+	// Total:1000
 	// Remains
 	// Sheets[rank]
-	//		Total
+	//		Total: S:50, A:150, B:300, C:500
 	//		Remains
 	//		Price
-	for i, v := range events {
-		event, err := getEvent(v.ID, -1)
-		if err != nil {
-			return nil, err
+	for _, event := range events {
+		var Remains int
+		for _, v := range remainsOfEvent[event.ID] {
+			Remains += v.Remains
 		}
-		for k := range event.Sheets { // sheets[k].Detail 削除
-			event.Sheets[k].Detail = nil
-		}
-		events[i] = event
+		event.Sheets = remainsOfEvent[event.ID]
+		event.Remains = Remains
 	}
 	return events, nil
 }
